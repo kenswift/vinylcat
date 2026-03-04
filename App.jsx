@@ -127,6 +127,21 @@ const styles = `
   .search-btn:hover { background:var(--amber); color:var(--black); }
   .api-key-notice { background:var(--groove); border:1px solid var(--amber-dim); border-radius:6px; padding:14px; margin-bottom:16px; font-family:'DM Mono',monospace; font-size:11px; color:var(--amber-dim); line-height:1.6; }
   .api-key-notice strong { color:var(--amber); }
+  .coll-actions { display:flex; gap:6px; flex-shrink:0; }
+  .edit-btn { background:none; border:1px solid var(--border); color:var(--muted); cursor:pointer; font-size:13px; padding:4px 8px; border-radius:3px; transition:all .2s; }
+  .edit-btn:hover { border-color:var(--amber-dim); color:var(--amber); }
+  .modal-backdrop { position:fixed; inset:0; background:rgba(0,0,0,.75); z-index:200; display:flex; align-items:flex-end; justify-content:center; }
+  .modal { background:var(--deep); border:1px solid var(--border); border-top:2px solid var(--amber-dim); border-radius:12px 12px 0 0; width:100%; max-width:480px; max-height:90vh; overflow-y:auto; padding:24px 20px 40px; }
+  .modal-header { display:flex; justify-content:space-between; align-items:center; margin-bottom:20px; }
+  .modal-title { font-family:'Playfair Display',serif; font-size:16px; color:var(--amber-light); }
+  .modal-close { background:none; border:1px solid var(--border); color:var(--muted); padding:5px 10px; border-radius:4px; cursor:pointer; font-family:'DM Mono',monospace; font-size:10px; letter-spacing:.05em; transition:all .2s; }
+  .modal-close:hover { border-color:var(--danger); color:var(--danger); }
+  .modal-section { font-family:'DM Mono',monospace; font-size:9px; letter-spacing:.15em; text-transform:uppercase; color:var(--amber-dim); margin:18px 0 10px; padding-bottom:6px; border-bottom:1px solid var(--border); }
+  .modal-actions { display:flex; gap:10px; margin-top:22px; }
+  .btn-save { background:var(--success); color:white; flex:1; }
+  .btn-save:hover { filter:brightness(1.1); }
+  .btn-danger { background:transparent; border:1px solid var(--danger); color:var(--danger); flex:0 0 auto; padding:12px 14px; }
+  .btn-danger:hover { background:var(--danger); color:white; }
 `;
 
 const CSV_HEADERS = ["Artist","Title","Label","Country","Year","Genre","Styles","Discogs URL","Vinyl Grade","Sleeve Grade","Tag Line","Description","MP3 Name","Location Code"];
@@ -201,7 +216,8 @@ async function fetchDiscogs(url, token) {
 
 function ObsForm({ vinylGrade, setVinylGrade, sleeveGrade, setSleeveGrade,
                    tagLine, setTagLine, description, setDescription,
-                   mp3Name, setMp3Name, locationCode, setLocationCode, onAdd }) {
+                   mp3Name, setMp3Name, locationCode, setLocationCode,
+                   discogsUrl, setDiscogsUrl, onAdd }) {
   return (
     <>
       <div className="divider"/>
@@ -230,8 +246,58 @@ function ObsForm({ vinylGrade, setVinylGrade, sleeveGrade, setSleeveGrade,
         <label className="field-label">Location Code</label>
         <input className="field-input" type="text" placeholder="e.g. A-3, Shelf 2…" value={locationCode} onChange={e=>setLocationCode(e.target.value)}/>
       </div>
+      <div className="field-group">
+        <label className="field-label">Discogs URL</label>
+        <input className="field-input" type="text" placeholder="https://www.discogs.com/release/…" value={discogsUrl||""} onChange={e=>setDiscogsUrl&&setDiscogsUrl(e.target.value)}/>
+      </div>
       <button className="btn btn-success" onClick={onAdd}>+ Add to Collection</button>
     </>
+  );
+}
+
+// Edit modal for collection items
+function EditModal({ record, onSave, onDelete, onClose }) {
+  const [fields, setFields] = useState({...record});
+  const set = (k,v) => setFields(f=>({...f,[k]:v}));
+  return (
+    <div className="modal-backdrop" onClick={e=>e.target===e.currentTarget&&onClose()}>
+      <div className="modal">
+        <div className="modal-header">
+          <div className="modal-title">Edit Record</div>
+          <button className="modal-close" onClick={onClose}>✕ Close</button>
+        </div>
+        <div className="modal-section">Release Info</div>
+        {[["artist","Artist"],["title","Title"],["label","Label"],["country","Country"],["year","Year"],["genre","Genre"],["styles","Styles"],["discogsUrl","Discogs URL"]].map(([k,l])=>(
+          <div className="field-group" key={k}>
+            <label className="field-label">{l}</label>
+            <input className="field-input" type="text" value={fields[k]||""} onChange={e=>set(k,e.target.value)}/>
+          </div>
+        ))}
+        <div className="modal-section">Grades</div>
+        <div className="field-group">
+          <label className="field-label">Vinyl Grade</label>
+          <div className="grade-row">{GRADES.map(g=><button key={g} className={`grade-btn ${fields.vinylGrade===g?"active":""}`} onClick={()=>set("vinylGrade",g===fields.vinylGrade?"":g)}>{g}</button>)}</div>
+        </div>
+        <div className="field-group">
+          <label className="field-label">Sleeve Grade</label>
+          <div className="grade-row">{GRADES.map(g=><button key={g} className={`grade-btn ${fields.sleeveGrade===g?"active":""}`} onClick={()=>set("sleeveGrade",g===fields.sleeveGrade?"":g)}>{g}</button>)}</div>
+        </div>
+        <div className="modal-section">Notes</div>
+        {[["tagLine","Tag Line","Short tag or note…"],["description","Description","Notes about this copy…"],["mp3Name","MP3 Name","linked audio filename…"],["locationCode","Location Code","e.g. A-3, Shelf 2…"]].map(([k,l,ph])=>(
+          <div className="field-group" key={k}>
+            <label className="field-label">{l}</label>
+            {k==="description"
+              ? <textarea className="field-textarea" placeholder={ph} value={fields[k]||""} onChange={e=>set(k,e.target.value)}/>
+              : <input className="field-input" type="text" placeholder={ph} value={fields[k]||""} onChange={e=>set(k,e.target.value)}/>
+            }
+          </div>
+        ))}
+        <div className="modal-actions">
+          <button className="btn btn-danger" onClick={()=>{onDelete(record.id);onClose();}}>🗑 Delete</button>
+          <button className="btn btn-save btn" onClick={()=>{onSave(fields);onClose();}}>Save Changes</button>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -260,11 +326,13 @@ export default function VinylCataloguer() {
   const [description, setDescription] = useState("");
   const [mp3Name, setMp3Name] = useState("");
   const [locationCode, setLocationCode] = useState("");
+  const [obsDiscogsUrl, setObsDiscogsUrl] = useState("");
 
   const [collection, setCollection] = useState(() => {
     try { return JSON.parse(localStorage.getItem("vc_collection") || "[]"); } catch { return []; }
   });
   const [toast, setToast] = useState(null);
+  const [editingRecord, setEditingRecord] = useState(null);
   const fileRef = useRef();
 
   const saveKeys = () => {
@@ -284,7 +352,7 @@ export default function VinylCataloguer() {
 
   const showToast = msg => { setToast(msg); setTimeout(()=>setToast(null),2500); };
 
-  const resetObs = () => { setVinylGrade(""); setSleeveGrade(""); setTagLine(""); setDescription(""); setMp3Name(""); setLocationCode(""); };
+  const resetObs = () => { setVinylGrade(""); setSleeveGrade(""); setTagLine(""); setDescription(""); setMp3Name(""); setLocationCode(""); setObsDiscogsUrl(""); };
   const resetScan = () => {
     setImageFile(null); setImagePreview(null); setResults([]);
     setSelected(null); setDetail(null); setStatus(null); setExtracted(null);
@@ -381,6 +449,7 @@ Return ONLY raw JSON, no markdown, no backticks:
     try {
       const data = await fetchDiscogs(`https://api.discogs.com/releases/${release.id}`, discogsToken);
       setDetail(data);
+      setObsDiscogsUrl(`https://www.discogs.com/release/${release.id}`);
       setStatus({type:"ok", msg:"Release loaded — add your observations below"});
     } catch(e) {
       setDetail(null);
@@ -417,6 +486,11 @@ Return ONLY raw JSON, no markdown, no backticks:
     } catch(e) { setStatus({type:"err", msg:"Discogs search failed", detail:e.message}); }
   };
 
+  const saveEdit = updated => {
+    updateCollection(prev => prev.map(r => r.id === updated.id ? updated : r));
+    showToast("Changes saved ✓");
+  };
+
   const addToCollection = source => {
     let entry;
     if (source==="manual") {
@@ -432,7 +506,7 @@ Return ONLY raw JSON, no markdown, no backticks:
         year:String(d.year||s.year||""),
         genre:(d.genres||s.genre||[]).join(", "),
         styles:(d.styles||[]).join(", "),
-        discogsUrl:`https://www.discogs.com/release/${d.id||s.id}`,
+        discogsUrl:obsDiscogsUrl||`https://www.discogs.com/release/${d.id||s.id}`,
         thumb:s.cover_image||s.thumb||"",
         vinylGrade,sleeveGrade,tagLine,description,mp3Name,locationCode
       };
@@ -620,7 +694,7 @@ Return ONLY raw JSON, no markdown, no backticks:
                   <div className="info-grid">
                     {[["Label",dispLabel],["Country",dispCountry],["Year",dispYear],["Genre",dispGenre],["Styles",dispStyles]].map(([k,v])=>v?(<div className="info-cell" key={k}><div className="info-cell-label">{k}</div><div className="info-cell-value">{v}</div></div>):null)}
                   </div>
-                  <ObsForm vinylGrade={vinylGrade} setVinylGrade={setVinylGrade} sleeveGrade={sleeveGrade} setSleeveGrade={setSleeveGrade} tagLine={tagLine} setTagLine={setTagLine} description={description} setDescription={setDescription} mp3Name={mp3Name} setMp3Name={setMp3Name} locationCode={locationCode} setLocationCode={setLocationCode} onAdd={()=>addToCollection("release")}/>
+                  <ObsForm vinylGrade={vinylGrade} setVinylGrade={setVinylGrade} sleeveGrade={sleeveGrade} setSleeveGrade={setSleeveGrade} tagLine={tagLine} setTagLine={setTagLine} description={description} setDescription={setDescription} mp3Name={mp3Name} setMp3Name={setMp3Name} locationCode={locationCode} setLocationCode={setLocationCode} discogsUrl={obsDiscogsUrl} setDiscogsUrl={setObsDiscogsUrl} onAdd={()=>addToCollection("release")}/>
                 </div>
               )}
             </>
@@ -652,7 +726,10 @@ Return ONLY raw JSON, no markdown, no backticks:
                           {r.locationCode&&<span className="coll-grade">{r.locationCode}</span>}
                         </div>
                       </div>
-                      <button className="del-btn" onClick={()=>updateCollection(prev=>prev.filter(x=>x.id!==r.id))}>🗑</button>
+                      <div className="coll-actions">
+                        <button className="edit-btn" onClick={()=>setEditingRecord(r)}>✏️</button>
+                        <button className="del-btn" onClick={()=>updateCollection(prev=>prev.filter(x=>x.id!==r.id))}>🗑</button>
+                      </div>
                     </div>
                   ))
               }
@@ -660,6 +737,7 @@ Return ONLY raw JSON, no markdown, no backticks:
           )}
         </div>
         {toast&&<div className="toast">{toast}</div>}
+        {editingRecord&&<EditModal record={editingRecord} onSave={saveEdit} onDelete={id=>{updateCollection(prev=>prev.filter(x=>x.id!==id));showToast("Deleted");}} onClose={()=>setEditingRecord(null)}/>}
       </div>
     </>
   );
