@@ -58,6 +58,8 @@ const styles = `
   @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.2} }
   .status-dot.green { background:var(--success); }
   .status-dot.red { background:var(--danger); }
+  .error-detail { background:var(--deep); border:1px solid var(--danger); border-radius:4px; padding:10px 12px; margin-top:8px; font-family:'DM Mono',monospace; font-size:10px; color:#d08080; line-height:1.6; word-break:break-all; }
+  .error-detail strong { color:var(--danger); display:block; margin-bottom:4px; }
   .results-section { margin-top:20px; }
   .section-label { font-family:'DM Mono',monospace; font-size:10px; letter-spacing:.15em; text-transform:uppercase; color:var(--amber); margin-bottom:12px; }
   .result-card { background:var(--card); border:1px solid var(--border); border-radius:6px; padding:14px; margin-bottom:8px; cursor:pointer; transition:all .2s; display:flex; gap:12px; align-items:flex-start; }
@@ -143,7 +145,6 @@ function toCSV(records) {
   return [CSV_HEADERS.join(","), ...rows].join("\n");
 }
 
-// Real file download — works in a proper browser outside Claude.ai sandbox
 function dlFile(content, filename, mime) {
   const blob = new Blob([content], {type: mime});
   const url = URL.createObjectURL(blob);
@@ -152,27 +153,50 @@ function dlFile(content, filename, mime) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
+// Call Claude via our Netlify proxy function (no CORS issues)
+async function callClaude(apiKey, payload) {
+  const res = await fetch("/api/claude", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ apiKey, payload })
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Proxy error ${res.status}: ${text}`);
+  }
+
+  const data = await res.json();
+  if (data.error) {
+    throw new Error(`Claude API error: ${JSON.stringify(data.error)}`);
+  }
+  return data;
+}
+
 async function fetchDiscogs(url, token) {
-  const headers = {"User-Agent":"VinylCataloguer/1.0"};
+  const headers = { "User-Agent": "VinylCataloguer/1.0" };
   if (token) headers["Authorization"] = `Discogs token=${token}`;
+
   const proxies = [
     u => `https://corsproxy.io/?${encodeURIComponent(u)}`,
     u => `https://api.allorigins.win/get?url=${encodeURIComponent(u)}`,
     u => u,
   ];
+
+  let lastErr = "";
   for (const makeUrl of proxies) {
     try {
-      const r = await fetch(makeUrl(url), {headers, signal: AbortSignal.timeout(8000)});
-      if (!r.ok) continue;
+      const r = await fetch(makeUrl(url), { headers, signal: AbortSignal.timeout(8000) });
+      if (!r.ok) { lastErr = `HTTP ${r.status} from ${makeUrl(url)}`; continue; }
       const text = await r.text();
       try {
         const outer = JSON.parse(text);
         if (outer.contents) return JSON.parse(outer.contents);
         return outer;
-      } catch { continue; }
-    } catch { continue; }
+      } catch(pe) { lastErr = `JSON parse error: ${pe.message}`; continue; }
+    } catch(fe) { lastErr = fe.message; continue; }
   }
-  throw new Error("Couldn't reach Discogs. Check your token in Settings or use manual entry.");
+  throw new Error(`Discogs unreachable. Last error: ${lastErr}`);
 }
 
 function ObsForm({ vinylGrade, setVinylGrade, sleeveGrade, setSleeveGrade,
@@ -219,7 +243,7 @@ export default function VinylCataloguer() {
 
   const [imageFile, setImageFile] = useState(null);
   const [imagePreview, setImagePreview] = useState(null);
-  const [status, setStatus] = useState(null);
+  const [status, setStatus] = useState(null); // {type, msg, detail}
   const [extracted, setExtracted] = useState(null);
   const [results, setResults] = useState([]);
   const [selected, setSelected] = useState(null);
@@ -237,7 +261,6 @@ export default function VinylCataloguer() {
   const [mp3Name, setMp3Name] = useState("");
   const [locationCode, setLocationCode] = useState("");
 
-  // Persist collection in localStorage so it survives page refreshes
   const [collection, setCollection] = useState(() => {
     try { return JSON.parse(localStorage.getItem("vc_collection") || "[]"); } catch { return []; }
   });
@@ -251,7 +274,7 @@ export default function VinylCataloguer() {
     setShowSettings(false);
   };
 
-  const updateCollection = (fn) => {
+  const updateCollection = fn => {
     setCollection(prev => {
       const next = fn(prev);
       localStorage.setItem("vc_collection", JSON.stringify(next));
@@ -278,60 +301,90 @@ export default function VinylCataloguer() {
 
   const identifyRecord = async () => {
     if (!imageFile) return;
-    if (!anthropicKey) { setStatus({type:"err", msg:"Add your Claude API key in Settings first"}); return; }
-    setStatus({type:"loading", msg:"Reading image with Claude Vision…"});
+    if (!anthropicKey) {
+      setStatus({type:"err", msg:"No Claude API key found", detail:"Open ⚙ Settings and paste your API key (starts with sk-ant-…)"});
+      return;
+    }
+
+    setStatus({type:"loading", msg:"Step 1/2 — Reading image with Claude Vision…"});
     setResults([]); setSelected(null); setDetail(null); setExtracted(null); setManualMode(false);
+
     try {
+      // Read image as base64
       const base64 = await new Promise((res,rej)=>{
         const reader = new FileReader();
         reader.onload = ()=>res(reader.result.split(",")[1]);
         reader.onerror = rej;
         reader.readAsDataURL(imageFile);
       });
-      const visionRes = await fetch("https://api.anthropic.com/v1/messages", {
-        method:"POST",
-        headers:{"Content-Type":"application/json","x-api-key":anthropicKey,"anthropic-version":"2023-06-01"},
-        body: JSON.stringify({
-          model:"claude-sonnet-4-20250514", max_tokens:600,
-          messages:[{role:"user",content:[
-            {type:"image",source:{type:"base64",media_type:imageFile.type||"image/jpeg",data:base64}},
-            {type:"text",text:`Look at this vinyl record photo and extract all identifying info visible.
+
+      // Call Claude via proxy
+      let vd;
+      try {
+        vd = await callClaude(anthropicKey, {
+          model: "claude-sonnet-4-20250514",
+          max_tokens: 600,
+          messages: [{
+            role: "user",
+            content: [
+              { type:"image", source:{ type:"base64", media_type:imageFile.type||"image/jpeg", data:base64 } },
+              { type:"text", text:`Look at this vinyl record photo and extract all identifying info visible.
 Return ONLY raw JSON, no markdown, no backticks:
-{"artist":"","title":"","label":"","catno":"","barcode":"","country":"","year":"","notes":""}`}
-          ]}]
-        })
-      });
-      const vd = await visionRes.json();
-      if (vd.error) throw new Error(`Vision error: ${vd.error.message}`);
+{"artist":"","title":"","label":"","catno":"","barcode":"","country":"","year":"","notes":""}` }
+            ]
+          }]
+        });
+      } catch(e) {
+        throw new Error(`Claude Vision failed: ${e.message}`);
+      }
+
       const rawText = vd.content.map(b=>b.text||"").join("").replace(/```json|```/g,"").trim();
       let ext;
-      try { ext = JSON.parse(rawText); } catch { throw new Error("Couldn't parse image data — try a clearer photo"); }
+      try { ext = JSON.parse(rawText); }
+      catch(e) { throw new Error(`Couldn't parse Claude response as JSON. Raw response: "${rawText.slice(0,200)}"`); }
+
       setExtracted(ext);
+
       const q = [ext.artist,ext.title,ext.label,ext.catno].filter(Boolean).join(" ").trim();
-      if (!q) throw new Error("Couldn't read enough text from this image.");
-      setStatus({type:"loading", msg:`Searching Discogs for "${q.slice(0,45)}…"`});
+      if (!q) throw new Error("Claude read the image but couldn't find any identifying text (artist, title, label, or catalog number). Try a clearer photo of the record label.");
+
+      setStatus({type:"loading", msg:`Step 2/2 — Searching Discogs for "${q.slice(0,40)}…"`});
+
       const params = new URLSearchParams({q, type:"release", per_page:"8"});
       if (ext.artist) params.set("artist", ext.artist);
       if (ext.title) params.set("release_title", ext.title);
-      const searchData = await fetchDiscogs(`https://api.discogs.com/database/search?${params}`, discogsToken);
-      if (!searchData.results?.length) { setStatus({type:"err", msg:`No Discogs results found. Try manual entry below.`}); return; }
+
+      let searchData;
+      try {
+        searchData = await fetchDiscogs(`https://api.discogs.com/database/search?${params}`, discogsToken);
+      } catch(e) {
+        throw new Error(`Discogs search failed: ${e.message}`);
+      }
+
+      if (!searchData.results?.length) {
+        setStatus({type:"err", msg:`No Discogs results for "${q}"`, detail:"Try the manual search box below, or paste a Discogs URL directly."});
+        return;
+      }
+
       setResults(searchData.results.slice(0,8));
       setStatus({type:"ok", msg:`Found ${Math.min(searchData.results.length,8)} releases — tap the one you have`});
+
     } catch(e) {
-      setStatus({type:"err", msg:e.message});
+      console.error("[VinylCataloguer]", e);
+      setStatus({type:"err", msg:"Identification failed", detail:e.message});
     }
   };
 
   const selectRelease = async release => {
     setSelected(release); setManualMode(false);
-    setStatus({type:"loading", msg:"Loading full release details…"});
+    setStatus({type:"loading", msg:"Loading full release details from Discogs…"});
     try {
       const data = await fetchDiscogs(`https://api.discogs.com/releases/${release.id}`, discogsToken);
       setDetail(data);
       setStatus({type:"ok", msg:"Release loaded — add your observations below"});
-    } catch {
+    } catch(e) {
       setDetail(null);
-      setStatus({type:"ok", msg:"Basic info shown — add observations below"});
+      setStatus({type:"ok", msg:"Showing basic info — add observations below", detail:`Full detail unavailable: ${e.message}`});
     }
   };
 
@@ -342,29 +395,29 @@ Return ONLY raw JSON, no markdown, no backticks:
 
   const lookupManualUrl = async () => {
     const match = manualUrl.match(/discogs\.com\/.*?(\d{4,})/);
-    if (!match) { setStatus({type:"err",msg:"Paste a Discogs release URL, e.g. https://www.discogs.com/release/12345"}); return; }
-    setStatus({type:"loading",msg:"Loading Discogs release…"});
+    if (!match) { setStatus({type:"err", msg:"Invalid URL", detail:"Paste a full Discogs release URL, e.g. https://www.discogs.com/release/12345"}); return; }
+    setStatus({type:"loading", msg:"Loading Discogs release…"});
     try {
       const data = await fetchDiscogs(`https://api.discogs.com/releases/${match[1]}`, discogsToken);
       setManualFields({ artist:data.artists_sort||"", title:data.title||"", label:data.labels?.[0]?.name||"", country:data.country||"", year:String(data.year||""), genre:(data.genres||[]).join(", "), styles:(data.styles||[]).join(", "), discogsUrl:`https://www.discogs.com/release/${match[1]}` });
-      setStatus({type:"ok",msg:"Release loaded — add observations below"});
-    } catch(e) { setStatus({type:"err",msg:"Couldn't fetch that URL. "+e.message}); }
+      setStatus({type:"ok", msg:"Release loaded — add observations below"});
+    } catch(e) { setStatus({type:"err", msg:"Couldn't fetch that URL", detail:e.message}); }
   };
 
   const manualSearch = async () => {
     if (!manualSearchQuery.trim()) return;
-    setStatus({type:"loading",msg:`Searching Discogs…`});
+    setStatus({type:"loading", msg:`Searching Discogs for "${manualSearchQuery}"…`});
     try {
-      const params = new URLSearchParams({q:manualSearchQuery,type:"release",per_page:"8"});
+      const params = new URLSearchParams({q:manualSearchQuery, type:"release", per_page:"8"});
       const data = await fetchDiscogs(`https://api.discogs.com/database/search?${params}`, discogsToken);
-      if (!data.results?.length) { setStatus({type:"err",msg:"No results found"}); return; }
+      if (!data.results?.length) { setStatus({type:"err", msg:"No Discogs results found", detail:"Try different search terms — artist name, album title, or catalog number"}); return; }
       setResults(data.results.slice(0,8));
       setManualMode(false);
-      setStatus({type:"ok",msg:`Found ${Math.min(data.results.length,8)} releases — tap the one you have`});
-    } catch(e) { setStatus({type:"err",msg:e.message}); }
+      setStatus({type:"ok", msg:`Found ${Math.min(data.results.length,8)} releases — tap the one you have`});
+    } catch(e) { setStatus({type:"err", msg:"Discogs search failed", detail:e.message}); }
   };
 
-  const addToCollection = (source) => {
+  const addToCollection = source => {
     let entry;
     if (source==="manual") {
       entry = {id:Date.now(),...manualFields,thumb:"",vinylGrade,sleeveGrade,tagLine,description,mp3Name,locationCode};
@@ -466,15 +519,23 @@ Return ONLY raw JSON, no markdown, no backticks:
               </div>
 
               {status && (
-                <div className="status-bar">
-                  <div className={`status-dot ${status.type==="loading"?"pulsing":status.type==="ok"?"green":"red"}`}/>
-                  <span>{status.msg}</span>
-                </div>
+                <>
+                  <div className="status-bar">
+                    <div className={`status-dot ${status.type==="loading"?"pulsing":status.type==="ok"?"green":"red"}`}/>
+                    <span>{status.msg}</span>
+                  </div>
+                  {status.detail && (
+                    <div className="error-detail">
+                      <strong>Details</strong>
+                      {status.detail}
+                    </div>
+                  )}
+                </>
               )}
 
-              {extracted && !selected && !manualMode && (
+              {(extracted || status?.type==="err") && !selected && !manualMode && (
                 <div style={{marginTop:10}}>
-                  <div className="manual-note">Can't reach Discogs? Try these instead:</div>
+                  <div className="manual-note">Can't reach Discogs or no match? Try these:</div>
                   <div className="btn-row" style={{marginTop:6}}>
                     <button className="btn btn-ghost" onClick={activateManual}>✏️ Enter manually</button>
                     <button className="btn btn-ghost" onClick={()=>{setManualMode("url");setSelected(null);}}>🔗 Paste Discogs URL</button>
